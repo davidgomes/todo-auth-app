@@ -1,9 +1,9 @@
-
 import { initTRPC, TRPCError } from '@trpc/server';
 import { createHTTPServer } from '@trpc/server/adapters/standalone';
 import 'dotenv/config';
 import cors from 'cors';
 import superjson from 'superjson';
+import { createHmac } from 'crypto';
 
 import { 
   signUpInputSchema, 
@@ -20,6 +20,8 @@ import { getTodos } from './handlers/get_todos';
 import { updateTodo } from './handlers/update_todo';
 import { deleteTodo } from './handlers/delete_todo';
 
+const JWT_SECRET = process.env['JWT_SECRET'] || 'your-secret-key';
+
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
 });
@@ -27,16 +29,39 @@ const t = initTRPC.context<Context>().create({
 const publicProcedure = t.procedure;
 const router = t.router;
 
-// Simple token validation function (replace with proper JWT library in production)
+// JWT-like token validation function using Node.js crypto
 function validateToken(token: string): { userId: number } | null {
   try {
-    // This is a simple base64 decode - in production use proper JWT
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString());
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return null;
+    }
+
+    const [header, payload, signature] = parts;
+    
+    // Verify signature
+    const expectedSignature = createHmac('sha256', JWT_SECRET)
+      .update(`${header}.${payload}`)
+      .digest('base64url');
+    
+    if (signature !== expectedSignature) {
+      return null;
+    }
+
+    // Decode payload
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    
+    // Check expiration
+    if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+
     if (decoded.userId && typeof decoded.userId === 'number') {
       return { userId: decoded.userId };
     }
     return null;
-  } catch {
+  } catch (error) {
+    console.error('Token verification failed:', error);
     return null;
   }
 }
