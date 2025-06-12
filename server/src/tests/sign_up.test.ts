@@ -27,7 +27,7 @@ describe('signUp', () => {
     expect(typeof result.token).toBe('string');
   });
 
-  it('should save user to database', async () => {
+  it('should save user to database with securely hashed password', async () => {
     const result = await signUp(testInput);
 
     // Query database to verify user was created
@@ -38,7 +38,12 @@ describe('signUp', () => {
 
     expect(users).toHaveLength(1);
     expect(users[0].email).toEqual('test@example.com');
-    expect(users[0].password_hash).toEqual('hashed_password123');
+    
+    // Verify password is properly hashed
+    expect(users[0].password_hash).not.toEqual('password123');
+    expect(users[0].password_hash).not.toEqual('hashed_password123');
+    expect(users[0].password_hash.startsWith('$pbkdf2$')).toBe(true); // pbkdf2 hash format
+    
     expect(users[0].created_at).toBeInstanceOf(Date);
     expect(users[0].updated_at).toBeInstanceOf(Date);
   });
@@ -62,5 +67,16 @@ describe('signUp', () => {
     expect(result.user.email).toEqual('user.name+tag@domain.co.uk');
     expect(result.user.id).toBeDefined();
     expect(result.token).toBeDefined();
+  });
+
+  it('should generate valid JWT tokens', async () => {
+    const result = await signUp(testInput);
+
+    // Verify token structure (JWT should have 3 parts separated by dots)
+    const tokenParts = result.token.split('.');
+    expect(tokenParts).toHaveLength(3);
+    
+    // Verify token is not empty
+    expect(result.token.length).toBeGreaterThan(0);
   });
 });

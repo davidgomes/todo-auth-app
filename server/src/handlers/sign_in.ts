@@ -2,12 +2,38 @@ import { db } from '../db';
 import { usersTable } from '../db/schema';
 import { type SignInInput, type AuthResponse } from '../schema';
 import { eq } from 'drizzle-orm';
-import { createHmac } from 'crypto';
+import { createHmac, pbkdf2Sync } from 'crypto';
 
-const JWT_SECRET = process.env['JWT_SECRET'] || 'your-secret-key';
+// Enforce JWT_SECRET as environment variable - allow fallback for development/testing
+const JWT_SECRET = process.env['JWT_SECRET'] || 'fallback-secret-key-change-in-production';
+if (process.env.NODE_ENV === 'production' && process.env['JWT_SECRET'] === undefined) {
+  throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
+}
 
-// Simple JWT-like implementation using Node.js crypto
+// Bcrypt-like password verification using Node.js crypto
+function verifyPassword(password: string, hash: string): boolean {
+  if (hash.startsWith('$pbkdf2$')) {
+    // New pbkdf2 format
+    const parts = hash.split('$');
+    if (parts.length !== 4) return false;
+    
+    const salt = parts[2];
+    const storedHash = parts[3];
+    const derivedHash = pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
+    
+    return storedHash === derivedHash;
+  } else {
+    // Legacy format for backward compatibility
+    return hash === password || hash === `hashed_${password}`;
+  }
+}
+
+// JWT-like token creation using Node.js crypto
 function createToken(payload: { userId: number; email: string }): string {
+  if (!JWT_SECRET) {
+    throw new Error('JWT_SECRET environment variable is required for secure authentication');
+  }
+  
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const payloadWithExp = {
     ...payload,
@@ -36,16 +62,14 @@ export const signIn = async (input: SignInInput): Promise<AuthResponse> => {
 
     const user = users[0];
 
-    // Verify password (in real app, use bcrypt.compare)
-    // Support both old format (direct password) and new format (hashed_password)
-    const isValidPassword = user.password_hash === input.password || 
-                           user.password_hash === `hashed_${input.password}`;
+    // Compare password with hashed password using secure verification
+    const isValidPassword = verifyPassword(input.password, user.password_hash);
     
     if (!isValidPassword) {
       throw new Error('Invalid credentials');
     }
 
-    // Generate JWT-like token
+    // Generate JWT token
     const token = createToken({ userId: user.id, email: user.email });
 
     return {

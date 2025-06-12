@@ -20,7 +20,11 @@ import { getTodos } from './handlers/get_todos';
 import { updateTodo } from './handlers/update_todo';
 import { deleteTodo } from './handlers/delete_todo';
 
-const JWT_SECRET = process.env['JWT_SECRET'] || 'your-secret-key';
+// Enforce JWT_SECRET as environment variable - allow fallback for development/testing
+const JWT_SECRET = process.env['JWT_SECRET'] || 'fallback-secret-key-change-in-production';
+if (process.env.NODE_ENV === 'production' && process.env['JWT_SECRET'] === undefined) {
+  throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
+}
 
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
@@ -29,9 +33,14 @@ const t = initTRPC.context<Context>().create({
 const publicProcedure = t.procedure;
 const router = t.router;
 
-// JWT-like token validation function using Node.js crypto
+// JWT token validation function using Node.js crypto (jsonwebtoken-like)
 function validateToken(token: string): { userId: number } | null {
   try {
+    if (!JWT_SECRET) {
+      console.error('JWT_SECRET not configured');
+      return null;
+    }
+    
     const parts = token.split('.');
     if (parts.length !== 3) {
       return null;
