@@ -4,64 +4,43 @@ import { type SignInInput, type AuthResponse } from '../schema';
 import { eq } from 'drizzle-orm';
 import { createHmac, pbkdf2Sync } from 'crypto';
 
-// Try to import external libraries, fall back to crypto if not available
-let bcrypt: any;
-let jwt: any;
-
-try {
-  bcrypt = require('bcryptjs');
-  jwt = require('jsonwebtoken');
-} catch {
-  // Fallback implementations using Node.js crypto
-  bcrypt = {
-    async compare(password: string, hash: string): Promise<boolean> {
-      if (hash.startsWith('$pbkdf2$')) {
-        const parts = hash.split('$');
-        if (parts.length !== 4) return false;
-        
-        const salt = parts[2];
-        const storedHash = parts[3];
-        const derivedHash = pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
-        
-        return storedHash === derivedHash;
-      } else {
-        // Legacy format for backward compatibility
-        return hash === password || hash === `hashed_${password}`;
-      }
-    }
-  };
-
-  jwt = {
-    sign(payload: { userId: number; email: string }, secret: string, options: { expiresIn: string }): string {
-      if (!secret) {
-        throw new Error('JWT_SECRET is required for token creation');
-      }
-      
-      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-      const payloadWithExp = {
-        ...payload,
-        exp: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
-      };
-      const payloadEncoded = Buffer.from(JSON.stringify(payloadWithExp)).toString('base64url');
-      
-      const signature = createHmac('sha256', secret)
-        .update(`${header}.${payloadEncoded}`)
-        .digest('base64url');
-      
-      return `${header}.${payloadEncoded}.${signature}`;
-    }
-  };
+const JWT_SECRET = process.env['JWT_SECRET'] || 'test-secret-key-for-development';
+if (!process.env['JWT_SECRET'] && process.env['NODE_ENV'] === 'production') {
+  throw new Error('JWT_SECRET environment variable is required for secure authentication in production.');
 }
 
-// Enforce JWT_SECRET as environment variable - no fallback in production
-const JWT_SECRET = process.env['JWT_SECRET'];
-if (!JWT_SECRET) {
-  if (process.env['NODE_ENV'] === 'production') {
-    throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
+// Crypto-based bcrypt-like comparison
+const comparePassword = async (password: string, hash: string): Promise<boolean> => {
+  if (hash.startsWith('$pbkdf2$')) {
+    const parts = hash.split('$');
+    if (parts.length !== 4) return false;
+    
+    const salt = parts[2];
+    const storedHash = parts[3];
+    const derivedHash = pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
+    
+    return storedHash === derivedHash;
   } else {
-    console.warn('JWT_SECRET not set, using fallback for development');
+    // Legacy format for backward compatibility
+    return hash === password || hash === `hashed_${password}`;
   }
-}
+};
+
+// Crypto-based JWT implementation
+const createToken = (payload: { userId: number; email: string }, secret: string, expiresIn: string): string => {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadWithExp = {
+    ...payload,
+    exp: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
+  };
+  const payloadEncoded = Buffer.from(JSON.stringify(payloadWithExp)).toString('base64url');
+  
+  const signature = createHmac('sha256', secret)
+    .update(`${header}.${payloadEncoded}`)
+    .digest('base64url');
+  
+  return `${header}.${payloadEncoded}.${signature}`;
+};
 
 export const signIn = async (input: SignInInput): Promise<AuthResponse> => {
   try {
@@ -77,18 +56,18 @@ export const signIn = async (input: SignInInput): Promise<AuthResponse> => {
 
     const user = users[0];
 
-    // Compare password with hashed password using bcrypt (external library or fallback)
-    const isValidPassword = await bcrypt.compare(input.password, user.password_hash);
+    // Compare password with hashed password using crypto-based implementation
+    const isValidPassword = await comparePassword(input.password, user.password_hash);
     
     if (!isValidPassword) {
       throw new Error('Invalid credentials');
     }
 
-    // Generate JWT token using jwt (external library or fallback)
-    const token = jwt.sign(
+    // Generate JWT token using crypto-based implementation
+    const token = createToken(
       { userId: user.id, email: user.email }, 
-      JWT_SECRET || 'fallback-secret-key-change-in-production', 
-      { expiresIn: '7d' }
+      JWT_SECRET, 
+      '7d'
     );
 
     return {
