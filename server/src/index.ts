@@ -20,11 +20,64 @@ import { getTodos } from './handlers/get_todos';
 import { updateTodo } from './handlers/update_todo';
 import { deleteTodo } from './handlers/delete_todo';
 
-// Enforce JWT_SECRET as environment variable - allow fallback for development/testing
-const JWT_SECRET = process.env['JWT_SECRET'] || 'fallback-secret-key-change-in-production';
-if (process.env.NODE_ENV === 'production' && process.env['JWT_SECRET'] === undefined) {
-  throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
+// Enforce JWT_SECRET as environment variable - no fallback in production
+const JWT_SECRET = process.env['JWT_SECRET'];
+if (!JWT_SECRET) {
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
+  } else {
+    console.warn('JWT_SECRET not set, using fallback for development');
+  }
 }
+
+// jsonwebtoken-like interface using Node.js crypto
+const jwt = {
+  verify(token: string, secret: string): any {
+    if (!secret) {
+      throw new Error('JWT_SECRET is required for token verification');
+    }
+    
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      const error = new Error('Invalid token format');
+      (error as any).name = 'JsonWebTokenError';
+      throw error;
+    }
+
+    const [header, payload, signature] = parts;
+    
+    // Verify signature
+    const expectedSignature = createHmac('sha256', secret)
+      .update(`${header}.${payload}`)
+      .digest('base64url');
+    
+    if (signature !== expectedSignature) {
+      const error = new Error('Invalid signature');
+      (error as any).name = 'JsonWebTokenError';
+      throw error;
+    }
+
+    // Decode payload
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    
+    // Check expiration
+    if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
+      const error = new Error('Token expired');
+      (error as any).name = 'TokenExpiredError';
+      throw error;
+    }
+
+    return decoded;
+  },
+
+  JsonWebTokenError: class extends Error {
+    name = 'JsonWebTokenError';
+  },
+  
+  TokenExpiredError: class extends Error {
+    name = 'TokenExpiredError';
+  }
+};
 
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
@@ -33,44 +86,28 @@ const t = initTRPC.context<Context>().create({
 const publicProcedure = t.procedure;
 const router = t.router;
 
-// JWT token validation function using Node.js crypto (jsonwebtoken-like)
+// JWT token validation function using jwt.verify
 function validateToken(token: string): { userId: number } | null {
   try {
-    if (!JWT_SECRET) {
-      console.error('JWT_SECRET not configured');
-      return null;
-    }
+    const decoded = jwt.verify(token, JWT_SECRET || 'fallback-secret-key-change-in-production') as any;
     
-    const parts = token.split('.');
-    if (parts.length !== 3) {
-      return null;
-    }
-
-    const [header, payload, signature] = parts;
-    
-    // Verify signature
-    const expectedSignature = createHmac('sha256', JWT_SECRET)
-      .update(`${header}.${payload}`)
-      .digest('base64url');
-    
-    if (signature !== expectedSignature) {
-      return null;
-    }
-
-    // Decode payload
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
-    
-    // Check expiration
-    if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
-      return null;
-    }
-
     if (decoded.userId && typeof decoded.userId === 'number') {
       return { userId: decoded.userId };
     }
     return null;
-  } catch (error) {
-    console.error('Token verification failed:', error);
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'name' in error) {
+      const jwtError = error as { name: string; message: string };
+      if (jwtError.name === 'JsonWebTokenError') {
+        console.error('Invalid JWT token:', jwtError.message);
+      } else if (jwtError.name === 'TokenExpiredError') {
+        console.error('JWT token expired:', jwtError.message);
+      } else {
+        console.error('Token verification failed:', error);
+      }
+    } else {
+      console.error('Token verification failed:', error);
+    }
     return null;
   }
 }

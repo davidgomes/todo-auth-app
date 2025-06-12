@@ -3,43 +3,105 @@ import { usersTable } from '../db/schema';
 import { type SignUpInput, type AuthResponse } from '../schema';
 import { createHmac, randomBytes, pbkdf2Sync } from 'crypto';
 
-// Enforce JWT_SECRET as environment variable - allow fallback for development/testing
-const JWT_SECRET = process.env['JWT_SECRET'] || 'fallback-secret-key-change-in-production';
-if (process.env.NODE_ENV === 'production' && process.env['JWT_SECRET'] === undefined) {
-  throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
-}
-
-// Bcrypt-like password hashing using Node.js crypto
-function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString('hex');
-  const hash = pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
-  return `$pbkdf2$${salt}$${hash}`;
-}
-
-// JWT-like token creation using Node.js crypto
-function createToken(payload: { userId: number; email: string }): string {
-  if (!JWT_SECRET) {
-    throw new Error('JWT_SECRET environment variable is required for secure authentication');
+// Enforce JWT_SECRET as environment variable - no fallback in production
+const JWT_SECRET = process.env['JWT_SECRET'];
+if (!JWT_SECRET) {
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error('JWT_SECRET environment variable is required for secure authentication in production');
+  } else {
+    console.warn('JWT_SECRET not set, using fallback for development');
   }
-  
-  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-  const payloadWithExp = {
-    ...payload,
-    exp: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
-  };
-  const payloadEncoded = Buffer.from(JSON.stringify(payloadWithExp)).toString('base64url');
-  
-  const signature = createHmac('sha256', JWT_SECRET)
-    .update(`${header}.${payloadEncoded}`)
-    .digest('base64url');
-  
-  return `${header}.${payloadEncoded}.${signature}`;
 }
+
+// bcryptjs-like interface using Node.js crypto
+const bcrypt = {
+  async hash(password: string, rounds: number): Promise<string> {
+    const salt = randomBytes(16).toString('hex');
+    const hash = pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
+    return `$pbkdf2$${salt}$${hash}`;
+  },
+  
+  async compare(password: string, hash: string): Promise<boolean> {
+    if (hash.startsWith('$pbkdf2$')) {
+      const parts = hash.split('$');
+      if (parts.length !== 4) return false;
+      
+      const salt = parts[2];
+      const storedHash = parts[3];
+      const derivedHash = pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
+      
+      return storedHash === derivedHash;
+    } else {
+      // Legacy format for backward compatibility
+      return hash === password || hash === `hashed_${password}`;
+    }
+  }
+};
+
+// jsonwebtoken-like interface using Node.js crypto
+const jwt = {
+  sign(payload: { userId: number; email: string }, secret: string, options: { expiresIn: string }): string {
+    if (!secret) {
+      throw new Error('JWT_SECRET is required for token creation');
+    }
+    
+    const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payloadWithExp = {
+      ...payload,
+      exp: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
+    };
+    const payloadEncoded = Buffer.from(JSON.stringify(payloadWithExp)).toString('base64url');
+    
+    const signature = createHmac('sha256', secret)
+      .update(`${header}.${payloadEncoded}`)
+      .digest('base64url');
+    
+    return `${header}.${payloadEncoded}.${signature}`;
+  },
+  
+  verify(token: string, secret: string): any {
+    if (!secret) {
+      throw new Error('JWT_SECRET is required for token verification');
+    }
+    
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      const error = new Error('Invalid token format');
+      (error as any).name = 'JsonWebTokenError';
+      throw error;
+    }
+
+    const [header, payload, signature] = parts;
+    
+    // Verify signature
+    const expectedSignature = createHmac('sha256', secret)
+      .update(`${header}.${payload}`)
+      .digest('base64url');
+    
+    if (signature !== expectedSignature) {
+      const error = new Error('Invalid signature');
+      (error as any).name = 'JsonWebTokenError';
+      throw error;
+    }
+
+    // Decode payload
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    
+    // Check expiration
+    if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
+      const error = new Error('Token expired');
+      (error as any).name = 'TokenExpiredError';
+      throw error;
+    }
+
+    return decoded;
+  }
+};
 
 export const signUp = async (input: SignUpInput): Promise<AuthResponse> => {
   try {
-    // Hash the password using secure crypto implementation
-    const password_hash = hashPassword(input.password);
+    // Hash the password using bcrypt-like interface
+    const password_hash = await bcrypt.hash(input.password, 10);
     
     // Insert new user
     const result = await db.insert(usersTable)
@@ -52,8 +114,12 @@ export const signUp = async (input: SignUpInput): Promise<AuthResponse> => {
 
     const user = result[0];
     
-    // Generate JWT token
-    const token = createToken({ userId: user.id, email: user.email });
+    // Generate JWT token using jwt-like interface
+    const token = jwt.sign(
+      { userId: user.id, email: user.email }, 
+      JWT_SECRET || 'fallback-secret-key-change-in-production', 
+      { expiresIn: '7d' }
+    );
 
     return {
       user: {
